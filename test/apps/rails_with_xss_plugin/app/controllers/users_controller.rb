@@ -129,4 +129,14 @@ class UsersController < ApplicationController
   def to_json
 
   end
+
+  def delete_them_all
+    if User.connection.select_value("SELECT * from users WHERE name='#{params[:name]}'").nil? #should warn
+      User.connection.execute("TRUNCATE users") #shouldn't warn
+    end
+  end
+
+  def test_sanitize
+    @x = params[:x]
+  end
 end

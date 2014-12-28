@@ -26,7 +26,7 @@ class Brakeman::TemplateProcessor < Brakeman::BaseProcessor
   def process exp
     begin
       super
-    rescue Exception => e
+    rescue => e
       except = e.exception("Error when processing #{@current_template[:name]}: #{e.message}")
       except.set_backtrace(e.backtrace)
       raise except
@@ -47,8 +47,8 @@ class Brakeman::TemplateProcessor < Brakeman::BaseProcessor
 
   #Adds output to the list of outputs.
   def process_output exp
-    process exp.value
-    @current_template[:outputs] << exp
+    exp.value = process exp.value
+    @current_template[:outputs] << exp unless exp.original_line
     exp
   end
 

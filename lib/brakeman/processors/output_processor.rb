@@ -18,7 +18,7 @@ class Brakeman::OutputProcessor < Ruby2Ruby
   def process exp
     begin
       super exp if sexp? exp and not exp.empty?
-    rescue Exception => e
+    rescue => e
       Brakeman.debug "While formatting #{exp}: #{e}\n#{e.backtrace.join("\n")}"
     end
   end
@@ -98,9 +98,32 @@ class Brakeman::OutputProcessor < Ruby2Ruby
     out
   end
 
+  def process_defn exp
+    # Copied from Ruby2Ruby except without the whole
+    # "convert methods to attr_*" stuff
+    name = exp.shift
+    args = process exp.shift
+    args = "" if args == "()"
+
+    exp.shift if exp == s(s(:nil)) # empty it out of a default nil expression
+
+    body = []
+    until exp.empty? do
+      body << indent(process(exp.shift))
+    end
+
+    body << indent("# do nothing") if body.empty?
+
+    body = body.join("\n")
+
+    return "def #{name}#{args}\n#{body}\nend".gsub(/\n\s*\n+/, "\n")
+  end
+
+  alias process_methdef process_defn
+
   def process_call_with_block exp
     call = process exp[0]
-    block = process exp[1] if exp[1]
+    block = process_rlist exp[2..-1]
     out = "#{call} do\n #{block}\n end"
     exp.clear
     out

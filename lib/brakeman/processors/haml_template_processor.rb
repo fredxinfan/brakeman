@@ -3,23 +3,8 @@ require 'brakeman/processors/template_processor'
 #Processes HAML templates.
 class Brakeman::HamlTemplateProcessor < Brakeman::TemplateProcessor
   HAML_FORMAT_METHOD = /format_script_(true|false)_(true|false)_(true|false)_(true|false)_(true|false)_(true|false)_(true|false)/
+  HAML_HELPERS = s(:colon2, s(:const, :Haml), :Helpers)
   
-  def initialize *args
-    super
-
-    @tracker.libs.each do |name, lib|
-      if name.to_s =~ /^Haml::Filters/
-        begin
-          require lib[:file]
-        rescue Exception => e
-          if @tracker.options[:debug]
-            raise e
-          end
-        end
-      end
-    end
-  end
-
   #Processes call, looking for template output
   def process_call exp
     target = exp.target
@@ -36,17 +21,16 @@ class Brakeman::HamlTemplateProcessor < Brakeman::TemplateProcessor
             when :options, :buffer
               exp
             when :open_tag
-              process(exp.arglist)
-              exp
+              process_call_args exp
             else
               arg = exp.first_arg
 
               if arg
                 @inside_concat = true
-                out = exp.arglist[1] = process(arg)
+                out = exp.first_arg = process(arg)
                 @inside_concat = false
               else
-                raise Exception.new("Empty _hamlout.#{method}()?")
+                raise "Empty _hamlout.#{method}()?"
               end
 
               if string? out
@@ -54,9 +38,7 @@ class Brakeman::HamlTemplateProcessor < Brakeman::TemplateProcessor
               else
                 case method.to_s
                 when "push_text"
-                  s = Sexp.new(:output, out)
-                  @current_template[:outputs] << s
-                  s
+                  build_output_from_push_text(out)
                 when HAML_FORMAT_METHOD
                   if $4 == "true"
                     Sexp.new :format_escaped, out
@@ -64,7 +46,7 @@ class Brakeman::HamlTemplateProcessor < Brakeman::TemplateProcessor
                     Sexp.new :format, out
                   end
                 else
-                  raise Exception.new("Unrecognized action on _hamlout: #{method}")
+                  raise "Unrecognized action on _hamlout: #{method}"
                 end
               end
 
@@ -74,10 +56,11 @@ class Brakeman::HamlTemplateProcessor < Brakeman::TemplateProcessor
       res
 
       #_hamlout.buffer <<
-      #This seems to be used rarely, but directly appends args to output buffer
+      #This seems to be used rarely, but directly appends args to output buffer.
+      #Has something to do with values of blocks?
     elsif sexp? target and method == :<< and is_buffer_target? target
       @inside_concat = true
-      out = exp.arglist[1] = process(exp.arglist[1])
+      out = exp.first_arg = process(exp.first_arg)
       @inside_concat = false
 
       if out.node_type == :str #ignore plain strings
@@ -94,9 +77,8 @@ class Brakeman::HamlTemplateProcessor < Brakeman::TemplateProcessor
       make_render_in_view exp
     else
       #TODO: Do we really need a new Sexp here?
-      args = process exp.arglist
-      call = Sexp.new :call, target, method, args
-      call.original_line(exp.original_line)
+      call = make_call target, method, process_all!(exp.args)
+      call.original_line = exp.original_line
       call.line(exp.line)
       call
     end
@@ -104,6 +86,7 @@ class Brakeman::HamlTemplateProcessor < Brakeman::TemplateProcessor
 
   #If inside an output stream, only return the final expression
   def process_block exp
+    exp = exp.dup
     exp.shift
     if @inside_concat
       @inside_concat = false
@@ -132,5 +115,53 @@ class Brakeman::HamlTemplateProcessor < Brakeman::TemplateProcessor
     node_type? exp.target, :lvar and
     exp.target.value == :_hamlout and
     exp.method == :buffer
+  end
+
+  #HAML likes to put interpolated values into _hamlout.push_text
+  #but we want to handle those individually
+  def build_output_from_push_text exp
+    if node_type? exp, :string_interp, :dstr
+      exp.map! do |e|
+        if sexp? e
+          if node_type? e, :string_eval, :evstr
+            e = e.value
+          end
+
+          get_pushed_value e
+        else
+          e
+        end
+      end
+    end
+  end
+
+  #Gets outputs from values interpolated into _hamlout.push_text
+  def get_pushed_value exp
+    return exp unless sexp? exp
+    
+    case exp.node_type
+    when :format
+      exp.node_type = :output
+      @current_template[:outputs] << exp
+      exp
+    when :format_escaped
+      exp.node_type = :escaped_output
+      @current_template[:outputs] << exp
+      exp
+    when :str, :ignore, :output, :escaped_output
+      exp
+    when :block, :rlist, :string_interp, :dstr
+      exp.map! { |e| get_pushed_value e }
+    else
+      if call? exp and exp.target == HAML_HELPERS and exp.method == :html_escape
+        s = Sexp.new(:escaped_output, exp.first_arg)
+      else
+        s = Sexp.new(:output, exp)
+      end
+
+      s.line(exp.line)
+      @current_template[:outputs] << s
+      s
+    end
   end
 end

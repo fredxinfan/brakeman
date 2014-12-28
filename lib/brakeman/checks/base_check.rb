@@ -13,21 +13,33 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
 
   Match = Struct.new(:type, :match)
 
+  class << self
+    attr_accessor :name
+
+    def inherited(subclass)
+      subclass.name = subclass.to_s.match(/^Brakeman::(.*)$/)[1]
+    end
+  end
+
   #Initialize Check with Checks.
-  def initialize tracker
+  def initialize(app_tree, tracker)
     super()
+    @app_tree = app_tree
     @results = [] #only to check for duplicates
     @warnings = []
     @tracker = tracker
     @string_interp = false
     @current_set = nil
     @current_template = @current_module = @current_class = @current_method = nil
+    @active_record_models = nil
     @mass_assign_disabled = nil
+    @has_user_input = nil
+    @safe_input_attributes = Set[:to_i, :to_f, :arel_table, :id]
   end
 
   #Add result to result list, which is used to check for duplicates
   def add_result result, location = nil
-    location ||= (@current_template && @current_template[:name]) || @current_class || @current_module || @current_set || result[:location][1]
+    location ||= (@current_template && @current_template[:name]) || @current_class || @current_module || @current_set || result[:location][:class] || result[:location][:template]
     location = location[:name] if location.is_a? Hash
     location = location.to_sym
 
@@ -59,18 +71,20 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
   #Process calls and check if they include user input
   def process_call exp
     process exp.target if sexp? exp.target
-    process_all exp.args
+    process_call_args exp
 
     target = exp.target
 
-    if params? target
-      @has_user_input = Match.new(:params, exp)
-    elsif cookies? target
-      @has_user_input = Match.new(:cookies, exp)
-    elsif request_env? target
-      @has_user_input = Match.new(:request, exp)
-    elsif sexp? target and model_name? target[1]
-      @has_user_input = Match.new(:model, exp)
+    unless @safe_input_attributes.include? exp.method
+      if params? target
+        @has_user_input = Match.new(:params, exp)
+      elsif cookies? target
+        @has_user_input = Match.new(:cookies, exp)
+      elsif request_env? target
+        @has_user_input = Match.new(:request, exp)
+      elsif sexp? target and model_name? target[1] #TODO: Can this be target.target?
+        @has_user_input = Match.new(:model, exp)
+      end
     end
 
     exp
@@ -100,15 +114,24 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
     exp
   end
 
+  #Does not actually process string interpolation, but notes that it occurred.
+  def process_string_interp exp
+    @string_interp = Match.new(:interp, exp)
+    process_default exp
+  end
+
   private
 
-  #Report a warning 
+  #Report a warning
   def warn options
-    warning = Brakeman::Warning.new(options.merge({ :check => self.class.to_s }))
-    warning.file = file_for warning
+    extra_opts = { :check => self.class.to_s }
 
-    @warnings << warning 
-  end 
+    warning = Brakeman::Warning.new(options.merge(extra_opts))
+    warning.file = file_for warning
+    warning.relative_path = relative_path(warning.file)
+
+    @warnings << warning
+  end
 
   #Run _exp_ through OutputProcessor to get a nice String.
   def format_output exp
@@ -116,13 +139,14 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
   end
 
   #Checks if the model inherits from parent,
-  def ancestor? model, parent
-    if model == nil
-      false
-    elsif model[:parent] == parent
+  def ancestor? model, parent, seen={}
+    return false unless model
+
+    seen[model[:name]] = true
+    if model[:parent] == parent || seen[model[:parent]]
       true
     elsif model[:parent]
-      ancestor? tracker.models[model[:parent]], parent
+      ancestor? tracker.models[model[:parent]], parent, seen
     else
       false
     end
@@ -133,11 +157,12 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
   end
 
   # go up the chain of parent classes to see if any have attr_accessible
-  def parent_classes_protected? model
-    if model[:attr_accessible]
+  def parent_classes_protected? model, seen={}
+    seen[model] = true
+    if model[:attr_accessible] or model[:includes].include? :"ActiveModel::ForbiddenAttributesProtection"
       true
-    elsif parent = tracker.models[model[:parent]]
-      parent_classes_protected? parent
+    elsif parent = tracker.models[model[:parent]] and !seen[parent]
+      parent_classes_protected? parent, seen
     else
       false
     end
@@ -146,24 +171,52 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
   #Checks if mass assignment is disabled globally in an initializer.
   def mass_assign_disabled?
     return @mass_assign_disabled unless @mass_assign_disabled.nil?
-        
+
     @mass_assign_disabled = false
 
-    if version_between?("3.1.0", "4.0.0") and 
-      tracker.config[:rails] and
-      tracker.config[:rails][:active_record] and 
+    if version_between?("3.1.0", "3.9.9") and
+      tracker.config[:rails][:active_record] and
       tracker.config[:rails][:active_record][:whitelist_attributes] == Sexp.new(:true)
 
       @mass_assign_disabled = true
-    else
-      matches = tracker.check_initializers(:"ActiveRecord::Base", :send)
+    elsif tracker.options[:rails4] && (!tracker.config[:gems][:protected_attributes] || (tracker.config[:rails][:active_record] &&
+            tracker.config[:rails][:active_record][:whitelist_attributes] == Sexp.new(:true)))
 
-      if matches.empty?
+      @mass_assign_disabled = true
+    else
+      #Check for ActiveRecord::Base.send(:attr_accessible, nil)
+      tracker.check_initializers(:"ActiveRecord::Base", :attr_accessible).each do |result|
+        call = result.call
+        if call? call
+          if call.first_arg == Sexp.new(:nil)
+            @mass_assign_disabled = true
+            break
+          end
+        end
+      end
+
+      unless @mass_assign_disabled
+        tracker.check_initializers(:"ActiveRecord::Base", :send).each do |result|
+          call = result.call
+          if call? call
+            if call.first_arg == Sexp.new(:lit, :attr_accessible) and call.second_arg == Sexp.new(:nil)
+              @mass_assign_disabled = true
+              break
+            end
+          end
+        end
+      end
+
+      unless @mass_assign_disabled
+        #Check for
+        #  class ActiveRecord::Base
+        #    attr_accessible nil
+        #  end
         matches = tracker.check_initializers([], :attr_accessible)
 
         matches.each do |result|
-          if result[1] == :ActiveRecord and result[2] == :Base
-            arg = result[-1][3][1]
+          if result.module == "ActiveRecord" and result.result_class == :Base
+            arg = result.call.first_arg
 
             if arg.nil? or node_type? arg, :nil
               @mass_assign_disabled = true
@@ -171,11 +224,30 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
             end
           end
         end
-      else
+      end
+    end
+
+    #There is a chance someone is using Rails 3.x and the `strong_parameters`
+    #gem and still using hack above, so this is a separate check for
+    #including ActiveModel::ForbiddenAttributesProtection in
+    #ActiveRecord::Base in an initializer.
+    if not @mass_assign_disabled and version_between?("3.1.0", "3.9.9") and tracker.config[:gems][:strong_parameters]
+      matches = tracker.check_initializers([], :include)
+      forbidden_protection = Sexp.new(:colon2, Sexp.new(:const, :ActiveModel), :ForbiddenAttributesProtection)
+
+      matches.each do |result|
+        if call? result.call and result.call.first_arg == forbidden_protection
+          @mass_assign_disabled = true
+        end
+      end
+
+      unless @mass_assign_disabled
+        matches = tracker.check_initializers(:"ActiveRecord::Base", [:send, :include])
+
         matches.each do |result|
-          if result[-1][3] == Sexp.new(:arglist, Sexp.new(:lit, :attr_accessible), Sexp.new(:nil))
+          call = result.call
+          if call? call and (call.first_arg == forbidden_protection or call.second_arg == forbidden_protection)
             @mass_assign_disabled = true
-            break
           end
         end
       end
@@ -195,7 +267,7 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
       raise ArgumentError
     end
 
-    location ||= (@current_template && @current_template[:name]) || @current_class || @current_module || @current_set || result[:location][1]
+    location ||= (@current_template && @current_template[:name]) || @current_class || @current_module || @current_set || result[:location][:class] || result[:location][:template]
 
     location = location[:name] if location.is_a? Hash
     location = location.to_sym
@@ -211,17 +283,6 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
     end
 
     false
-  end
-
-  #Ignores ignores
-  def process_ignore exp
-    exp
-  end
-
-  #Does not actually process string interpolation, but notes that it occurred.
-  def process_string_interp exp
-    @string_interp = Match.new(:interp, exp)
-    exp
   end
 
   #Checks if an expression contains string interpolation.
@@ -255,19 +316,15 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
   def has_immediate_user_input? exp
     if exp.nil?
       false
-    elsif params? exp
-      return Match.new(:params, exp)
-    elsif cookies? exp
-      return Match.new(:cookies, exp)
-    elsif call? exp
-      if params? exp.target
+    elsif call? exp and not @safe_input_attributes.include? exp.method
+      if params? exp
         return Match.new(:params, exp)
-      elsif cookies? exp.target
+      elsif cookies? exp
         return Match.new(:cookies, exp)
-      elsif request_env? exp.target
+      elsif request_env? exp
         return Match.new(:request, exp)
       else
-        false
+        has_immediate_user_input? exp.target
       end
     elsif sexp? exp
       case exp.node_type
@@ -318,9 +375,15 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
       target = exp.target
       method = exp.method
 
-      if call? target and not method.to_s[-1,1] == "?"
-        has_immediate_model? target, out
-      elsif model_name? target 
+      if @safe_input_attributes.include? method
+        false
+      elsif call? target and not method.to_s[-1,1] == "?"
+        if res = has_immediate_model?(target, out)
+          exp
+        else
+          false
+        end
+      elsif model_name? target
         exp
       else
         false
@@ -363,7 +426,7 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
 
   #Checks if +exp+ is a model name.
   #
-  #Prior to using this method, either @tracker must be set to 
+  #Prior to using this method, either @tracker must be set to
   #the current tracker, or else @models should contain an array of the model
   #names, which is available via tracker.models.keys
   def model_name? exp
@@ -372,37 +435,9 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
     if exp.is_a? Symbol
       @models.include? exp
     elsif sexp? exp
-      klass = nil
-      begin
-        klass = class_name exp
-      rescue StandardError
-      end
-
-      klass and @models.include? klass
+      @models.include? class_name(exp)
     else
       false
-    end
-  end
-
-  #Finds entire method call chain where +target+ is a target in the chain
-  def find_chain exp, target
-    return unless sexp? exp 
-
-    case exp.node_type
-    when :output, :format
-      find_chain exp.value, target
-    when :call
-      if exp == target or include_target? exp, target
-        return exp 
-      end
-    else
-      exp.each do |e|
-        if sexp? e
-          res = find_chain e, target
-          return res if res
-        end
-      end
-      nil
     end
   end
 
@@ -420,10 +455,11 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
   #Returns true if low_version <= RAILS_VERSION <= high_version
   #
   #If the Rails version is unknown, returns false.
-  def version_between? low_version, high_version
-    return false unless tracker.config[:rails_version]
+  def version_between? low_version, high_version, current_version = nil
+    current_version ||= tracker.config[:rails_version]
+    return false unless current_version
 
-    version = tracker.config[:rails_version].split(".").map! { |n| n.to_i }
+    version = current_version.split(".").map! { |n| n.to_i }
     low_version = low_version.split(".").map! { |n| n.to_i }
     high_version = high_version.split(".").map! { |n| n.to_i }
 
@@ -446,8 +482,15 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
     true
   end
 
-  def gemfile_or_environment
-    if File.exist? File.expand_path "#{tracker.options[:app_path]}/Gemfile"
+  def lts_version? version
+    tracker.config[:gems][:'railslts-version'] and
+    version_between? version, "2.3.18.99", tracker.config[:gems][:'railslts-version'][:version]
+  end
+
+  def gemfile_or_environment gem_name = :rails
+    if gem_name and info = tracker.config[:gems][gem_name]
+      info
+    elsif @app_tree.exists?("Gemfile")
       "Gemfile"
     else
       "config/environment.rb"
@@ -470,5 +513,24 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
     end
 
     @active_record_models
+  end
+
+  def friendly_type_of input_type
+    if input_type.is_a? Match
+      input_type = input_type.type
+    end
+
+    case input_type
+    when :params
+      "parameter value"
+    when :cookies
+      "cookie value"
+    when :request
+      "request value"
+    when :model
+      "model attribute"
+    else
+      "user input"
+    end
   end
 end

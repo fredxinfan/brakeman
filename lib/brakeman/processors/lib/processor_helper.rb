@@ -7,6 +7,37 @@ module Brakeman::ProcessorHelper
     exp
   end
 
+  def process_all! exp
+    exp.map! do |e|
+      if sexp? e
+        process e
+      else
+        e
+      end
+    end
+
+    exp
+  end
+
+  #Process the arguments of a method call. Does not store results.
+  #
+  #This method is used because Sexp#args and Sexp#arglist create new objects.
+  def process_call_args exp
+    exp.each_arg do |a|
+      process a if sexp? a
+    end
+
+    exp
+  end
+
+  def process_class exp
+    current_class = @current_class
+    @current_class = class_name exp[1]
+    process_all exp.body
+    @current_class = current_class
+    exp
+  end
+
   #Sets the current module.
   def process_module exp
     module_name = class_name(exp.class_name).to_s
@@ -18,7 +49,11 @@ module Brakeman::ProcessorHelper
       @current_module = module_name
     end
 
-    process exp.body
+    if block_given?
+      yield
+    else
+      process_all exp.body
+    end
 
     @current_module = prev_module
 
@@ -26,6 +61,7 @@ module Brakeman::ProcessorHelper
   end
 
   #Returns a class name as a Symbol.
+  #If class name cannot be determined, returns _exp_.
   def class_name exp
     case exp
     when Sexp
@@ -35,22 +71,20 @@ module Brakeman::ProcessorHelper
       when :lvar
         exp.value.to_sym
       when :colon2
-        "#{class_name(exp[1])}::#{exp[2]}".to_sym
+        "#{class_name(exp.lhs)}::#{exp.rhs}".to_sym
       when :colon3
         "::#{exp.value}".to_sym
-      when :call
-        process exp
       when :self
         @current_class || @current_module || nil
       else
-        raise "Error: Cannot get class name from #{exp}"
+        exp
       end
     when Symbol
       exp
     when nil
       nil
     else
-      raise "Error: Cannot get class name from #{exp}"
+      exp
     end
   end
 end

@@ -43,4 +43,30 @@ class OtherController < ApplicationController
   def test_mail_to
     @user = User.find(current_user)
   end
+
+  def test_command_injection_locals
+    `#{some_command}`
+    system("ls #{some_files}")
+  end
+
+  def test_mass_assign_with_strong_params
+    Bill.create(params[:charge])
+  end
+
+  def test_sql_deletes
+    User.delete_all("name = #{params[:name]}")
+    User.destroy_all("human = #{User.current.humanity}")
+  end
+
+  def test_sql_to_s status
+    column = "#{product_action_type_key.to_s}_count"
+    # Should warn about "product_action_type_key", not "product_action_type_key.to_s"
+    Product.where(id: product_id).update_all ["#{column} = #{column} + ?", delta]
+    # Should not warn
+    Product.where("id = #{id.to_s}")
+    # Should warn about "status" not "status.to_s"
+    Product.find(:all, :conditions => "product_status_id = " + status.to_s)
+    # Show not warn
+    Product.find(:all, :conditions => "id = " + Product.first.id.to_s)
+  end
 end

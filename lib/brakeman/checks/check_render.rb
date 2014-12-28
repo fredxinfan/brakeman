@@ -8,11 +8,11 @@ class Brakeman::CheckRender < Brakeman::BaseCheck
 
   def run_check
     tracker.find_call(:target => nil, :method => :render).each do |result|
-      process_render result
+      process_render_result result
     end
   end
 
-  def process_render result
+  def process_render_result result
     return unless node_type? result[:call], :render
 
     case result[:call].render_type
@@ -47,25 +47,13 @@ class Brakeman::CheckRender < Brakeman::BaseCheck
         return
       end
 
-      message = "Render path contains "
+      return if input.type == :model #skip models
 
-      case input.type
-      when :params
-        message << "parameter value"
-      when :cookies
-        message << "cookie value"
-      when :request
-        message << "request value"
-      when :model
-        #Skip models
-        return
-      else
-        message << "user input value"
-      end
-
+      message = "Render path contains #{friendly_type_of input}"
 
       warn :result => result,
         :warning_type => "Dynamic Render Path",
+        :warning_code => :dynamic_render_path,
         :message => message,
         :user_input => input.match,
         :confidence => confidence

@@ -1,6 +1,7 @@
 require 'set'
 require 'brakeman/processors/alias_processor'
 require 'brakeman/processors/lib/render_helper'
+require 'brakeman/tracker'
 
 #Processes aliasing in templates.
 #Handles calls to +render+.
@@ -31,38 +32,41 @@ class Brakeman::TemplateAliasProcessor < Brakeman::AliasProcessor
 
   #Determine template name
   def template_name name
-    unless name.to_s.include? "/"
+    if !name.to_s.include?('/') && @template[:name].to_s.include?('/')
       name = "#{@template[:name].to_s.match(/^(.*\/).*$/)[1]}#{name}"
     end
     name
   end
 
+  UNKNOWN_MODEL_CALL = Sexp.new(:call, Sexp.new(:const, Brakeman::Tracker::UNKNOWN_MODEL), :new)
+  FORM_BUILDER_CALL = Sexp.new(:call, Sexp.new(:const, :FormBuilder), :new)
+
   #Looks for form methods and iterating over collections of Models
   def process_call_with_block exp
     process_default exp
-    
+
     call = exp.block_call
 
     if call? call
       target = call.target
       method = call.method
-      args = exp.block_args
+      arg = exp.block_args.first_param
       block = exp.block
 
       #Check for e.g. Model.find.each do ... end
-      if method == :each and args and block and model = get_model_target(target)
-        if node_type? args, :lasgn
+      if method == :each and arg and block and model = get_model_target(target)
+        if arg.is_a? Symbol
           if model == target.target
-            env[Sexp.new(:lvar, args.lhs)] = Sexp.new(:call, model, :new, Sexp.new(:arglist))
+            env[Sexp.new(:lvar, arg)] = Sexp.new(:call, model, :new)
           else
-            env[Sexp.new(:lvar, args.lhs)] = Sexp.new(:call, Sexp.new(:const, Brakeman::Tracker::UNKNOWN_MODEL), :new, Sexp.new(:arglist))
+            env[Sexp.new(:lvar, arg)] = UNKNOWN_MODEL_CALL
           end
 
           process block if sexp? block
         end
       elsif FORM_METHODS.include? method
-        if node_type? args, :lasgn
-          env[Sexp.new(:lvar, args.lhs)] = Sexp.new(:call, Sexp.new(:const, :FormBuilder), :new, Sexp.new(:arglist)) 
+        if arg.is_a? Symbol
+          env[Sexp.new(:lvar, arg)] = FORM_BUILDER_CALL
 
           process block if sexp? block
         end
@@ -81,13 +85,8 @@ class Brakeman::TemplateAliasProcessor < Brakeman::AliasProcessor
 
       if exp.method == :all or exp.method.to_s[0,4] == "find"
         models = Set.new @tracker.models.keys
-
-        begin
-          name = class_name target
-          return target if models.include?(name)
-        rescue StandardError
-        end
-
+        name = class_name target
+        return target if models.include?(name)
       end
 
       return get_model_target(target)
@@ -96,11 +95,17 @@ class Brakeman::TemplateAliasProcessor < Brakeman::AliasProcessor
     false
   end
 
+  #Ignore `<<` calls on template variables which are used by the templating
+  #library (HAML, ERB, etc.)
   def find_push_target exp
     if sexp? exp
       if exp.node_type == :lvar and (exp.value == :_buf or exp.value == :_erbout)
         return nil
       elsif exp.node_type == :ivar and exp.value == :@output_buffer
+        return nil
+      elsif exp.node_type == :call and call? exp.target and
+        exp.target.method == :_hamlout and exp.method == :buffer
+
         return nil
       end
     end

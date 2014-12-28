@@ -13,7 +13,7 @@ module Brakeman::RenderHelper
     when :default
       begin
         process_template template_name, exp[3]
-      rescue ArgumentError => e
+      rescue ArgumentError
         Brakeman.debug "Problem processing render: #{exp}"
       end
     when :partial, :layout
@@ -92,7 +92,7 @@ module Brakeman::RenderHelper
 
       if hash? options[:locals]
         hash_iterate options[:locals] do |key, value|
-          template_env[Sexp.new(:call, nil, key.value, Sexp.new(:arglist))] = value
+          template_env[Sexp.new(:call, nil, key.value)] = value
         end
       end
 
@@ -109,7 +109,9 @@ module Brakeman::RenderHelper
           end
         end
 
-        template_env[Sexp.new(:call, nil, variable, Sexp.new(:arglist))] = Sexp.new(:call, Sexp.new(:const, Brakeman::Tracker::UNKNOWN_MODEL), :new, Sexp.new(:arglist))
+        collection = get_class_target(options[:collection]) || Brakeman::Tracker::UNKNOWN_MODEL
+
+        template_env[Sexp.new(:call, nil, variable)] = Sexp.new(:call, Sexp.new(:const, collection), :new)
       end
 
       #Set original_line for values so it is clear
@@ -118,7 +120,7 @@ module Brakeman::RenderHelper
         unless value.original_line
           #TODO: This has been broken for a while now and no one noticed
           #so maybe we can skip it
-          value.original_line(value.line)
+          value.original_line = value.line
         end
       end
 
@@ -126,6 +128,14 @@ module Brakeman::RenderHelper
       #current environment.
       #TODO: Add in :locals => { ... } to environment
       src = Brakeman::TemplateAliasProcessor.new(@tracker, template, called_from).process_safely(template[:src], template_env)
+
+      digest = Digest::SHA1.new.update(name + src.to_s).to_s.to_sym
+
+      if @tracker.template_cache.include? digest
+        return
+      else
+        @tracker.template_cache << digest
+      end
 
       #Run alias-processed src through the template processor to pull out
       #information and outputs.
@@ -153,5 +163,18 @@ module Brakeman::RenderHelper
     end
 
     options
+  end
+
+  def get_class_target sexp
+    if call? sexp
+      get_class_target sexp.target
+    else
+      klass = class_name sexp
+      if klass.is_a? Symbol
+        klass
+      else
+        nil
+      end
+    end
   end
 end

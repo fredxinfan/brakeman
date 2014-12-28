@@ -4,7 +4,7 @@ require 'brakeman/processors/template_processor'
 #(those ending in .html.erb or .rthml).
 class Brakeman::ErbTemplateProcessor < Brakeman::TemplateProcessor
   
-  #s(:call, TARGET, :method, s(:arglist))
+  #s(:call, TARGET, :method, ARGS)
   def process_call exp
     target = exp.target
     if sexp? target
@@ -16,14 +16,14 @@ class Brakeman::ErbTemplateProcessor < Brakeman::TemplateProcessor
     if node_type? target, :lvar and target.value == :_erbout
       if method == :concat
         @inside_concat = true
-        args = exp.arglist = process(exp.arglist)
+        exp.arglist = process(exp.arglist)
         @inside_concat = false
 
-        if args.length > 2
-          raise Exception.new("Did not expect more than a single argument to _erbout.concat")
+        if exp.second_arg
+          raise "Did not expect more than a single argument to _erbout.concat"
         end
 
-        arg = args[1]
+        arg = exp.first_arg
 
         if arg.node_type == :call and arg.method == :to_s #erb always calls to_s on output
           arg = arg.target
@@ -47,9 +47,8 @@ class Brakeman::ErbTemplateProcessor < Brakeman::TemplateProcessor
       make_render_in_view exp
     else
       #TODO: Is it really necessary to create a new Sexp here?
-      args = exp.arglist = process(exp.arglist)
-      call = Sexp.new :call, target, method, args
-      call.original_line(exp.original_line)
+      call = make_call target, method, process_all!(exp.args)
+      call.original_line = exp.original_line
       call.line(exp.line)
       call
     end
@@ -57,6 +56,7 @@ class Brakeman::ErbTemplateProcessor < Brakeman::TemplateProcessor
 
   #Process block, removing irrelevant expressions
   def process_block exp
+    exp = exp.dup
     exp.shift
     if @inside_concat
       @inside_concat = false
@@ -64,7 +64,7 @@ class Brakeman::ErbTemplateProcessor < Brakeman::TemplateProcessor
         process e
       end
       @inside_concat = true
-      process exp[-1]
+      process exp.last
     else
       exp.map! do |e|
         res = process e

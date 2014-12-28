@@ -1,6 +1,6 @@
-require 'brakeman/processors/base_processor'
+require 'brakeman/processors/lib/basic_processor'
 
-class Brakeman::FindAllCalls < Brakeman::BaseProcessor
+class Brakeman::FindAllCalls < Brakeman::BasicProcessor
   attr_reader :calls
 
   def initialize tracker
@@ -9,25 +9,27 @@ class Brakeman::FindAllCalls < Brakeman::BaseProcessor
     @current_method = nil
     @in_target = false
     @calls = []
+    @cache = {}
   end
 
   #Process the given source. Provide either class and method being searched
   #or the template. These names are used when reporting results.
-  def process_source exp, klass = nil, method = nil, template = nil
-    @current_class = klass
-    @current_method = method
-    @current_template = template
+  def process_source exp, opts
+    @current_class = opts[:class]
+    @current_method = opts[:method]
+    @current_template = opts[:template]
+    @current_file = opts[:file]
     process exp
   end
 
   #Process body of method
   def process_methdef exp
-    process exp.body
+    process_all exp.body
   end
 
   #Process body of method
   def process_selfdef exp
-    process exp.body
+    process_all exp.body
   end
 
   #Process body of block
@@ -36,45 +38,43 @@ class Brakeman::FindAllCalls < Brakeman::BaseProcessor
   end
 
   def process_call exp
-    target = get_target exp.target
-    
-    if call? target
-      already_in_target = @in_target
-      @in_target = true
-      process target
-      @in_target = already_in_target
-    end
+    @calls << create_call_hash(exp)
+    exp
+  end
 
-    method = exp.method
-    process_all exp.args
+  def process_call_with_block exp
+    call = exp.block_call
 
-    call = { :target => target, :method => method, :call => exp, :nested => @in_target, :chain => get_chain(exp) }
-    
-    if @current_template
-      call[:location] = [:template, @current_template]
+    if call.node_type == :call
+      call_hash = create_call_hash(call)
+
+      call_hash[:block] = exp.block
+      call_hash[:block_args] = exp.block_args
+
+      @calls << call_hash
+
+      process exp.block
     else
-      call[:location] = [:class, @current_class, @current_method]
+      #Probably a :render call with block
+      process call
+      process exp.block
     end
-
-    @calls << call
 
     exp
   end
+
+  alias process_iter process_call_with_block
 
   #Calls to render() are converted to s(:render, ...) but we would
   #like them in the call cache still for speed
   def process_render exp
     process exp.last if sexp? exp.last
 
-    call = { :target => nil, :method => :render, :call => exp, :nested => false }
-
-    if @current_template
-      call[:location] = [:template, @current_template]
-    else
-      call[:location] = [:class, @current_class, @current_method]
-    end
-
-    @calls << call
+    @calls << { :target => nil,
+                :method => :render,
+                :call => exp,
+                :nested => false,
+                :location => make_location }
 
     exp
   end
@@ -84,15 +84,37 @@ class Brakeman::FindAllCalls < Brakeman::BaseProcessor
   def process_dxstr exp
     process exp.last if sexp? exp.last
 
-    call = { :target => nil, :method => :`, :call => exp, :nested => false }
+    @calls << { :target => nil,
+                :method => :`,
+                :call => exp,
+                :nested => false,
+                :location => make_location }
 
-    if @current_template
-      call[:location] = [:template, @current_template]
-    else
-      call[:location] = [:class, @current_class, @current_method]
-    end
+    exp
+  end
 
-    @calls << call
+  #:"string" is equivalent to "string".to_sym
+  def process_dsym exp
+    exp.each { |arg| process arg if sexp? arg }
+
+    @calls << { :target => nil,
+                :method => :literal_to_sym,
+                :call => exp,
+                :nested => false,
+                :location => make_location }
+
+    exp
+  end
+
+  # Process a dynamic regex like a call
+  def process_dregx exp
+    exp.each { |arg| process arg if sexp? arg }
+
+    @calls << { :target => nil,
+                :method => :brakeman_regex_interp,
+                :call => exp,
+                :nested => false,
+                :location => make_location }
 
     exp
   end
@@ -114,11 +136,7 @@ class Brakeman::FindAllCalls < Brakeman::BaseProcessor
       when :true, :false
         exp[0]
       when :colon2
-        begin
-          class_name exp
-        rescue StandardError
-          exp
-        end
+        class_name exp
       when :self
         @current_class || @current_module || nil
       else
@@ -137,5 +155,48 @@ class Brakeman::FindAllCalls < Brakeman::BaseProcessor
     else
       [get_target(call)]
     end
+  end
+
+  def make_location
+    if @current_template
+      key = [@current_template, @current_file]
+      cached = @cache[key]
+      return cached if cached
+
+      @cache[key] = { :type => :template,
+        :template => @current_template,
+        :file => @current_file }
+    else
+      key = [@current_class, @current_method, @current_file]
+      cached = @cache[key]
+      return cached if cached
+      @cache[key] = { :type => :class,
+        :class => @current_class,
+        :method => @current_method,
+        :file => @current_file }
+    end
+
+  end
+
+  #Return info hash for a call Sexp
+  def create_call_hash exp
+    target = get_target exp.target
+
+    if call? target
+      already_in_target = @in_target
+      @in_target = true
+      process target
+      @in_target = already_in_target
+    end
+
+    method = exp.method
+    process_call_args exp
+
+    { :target => target,
+      :method => method,
+      :call => exp,
+      :nested => @in_target,
+      :chain => get_chain(exp),
+      :location => make_location }
   end
 end

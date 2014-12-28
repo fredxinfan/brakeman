@@ -26,8 +26,9 @@ class Brakeman::CheckStripTags < Brakeman::BaseCheck
       end
 
       warn :warning_type => "Cross Site Scripting",
+        :warning_code => :CVE_2011_2931,
         :message => message,
-        :file => gemfile_or_environment,
+        :gem_info => gemfile_or_environment,
         :confidence => CONFIDENCE[:high],
         :link_path => "https://groups.google.com/d/topic/rubyonrails-security/K5EwdJt06hI/discussion"
     end
@@ -48,9 +49,10 @@ class Brakeman::CheckStripTags < Brakeman::BaseCheck
     end
 
     warn :warning_type => "Cross Site Scripting",
+      :warning_code => :CVE_2012_3465,
       :message => message,
       :confidence => CONFIDENCE[:high],
-      :file => gemfile_or_environment,
+      :gem_info => gemfile_or_environment,
       :link_path => "https://groups.google.com/d/topic/rubyonrails-security/FgVEtBajcTY/discussion"
   end
 

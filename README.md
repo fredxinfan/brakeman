@@ -1,16 +1,19 @@
 ![Brakeman Logo](http://brakemanscanner.org/images/logo_medium.png)
 
-![Travis CI Status](https://secure.travis-ci.org/presidentbeef/brakeman.png) [![Code Climate](https://codeclimate.com/badge.png)](https://codeclimate.com/github/presidentbeef/brakeman)
+[![Travis CI
+Status](https://secure.travis-ci.org/presidentbeef/brakeman.png)](https://travis-ci.org/presidentbeef/brakeman)
+[![Code
+Climate](https://codeclimate.com/github/presidentbeef/brakeman.png)](https://codeclimate.com/github/presidentbeef/brakeman)
 
 # Brakeman
 
 Brakeman is a static analysis tool which checks Ruby on Rails applications for security vulnerabilities.
 
-It targets Rails versions 2.x and 3.x.
- 
+It works with Rails 2.x, 3.x, and 4.x.
+
 There is also a [plugin available](http://brakemanscanner.org/docs/jenkins/) for Jenkins/Hudson.
 
-For even more continuous testing, try the [Guard plugin](https://github.com/oreoshake/guard-brakeman).
+For even more continuous testing, try the [Guard plugin](https://github.com/guard/guard-brakeman).
 
 # Homepage/News
 
@@ -26,6 +29,12 @@ Using RubyGems:
 
     gem install brakeman
 
+Using Bundler, add to development group in Gemfile and set to not be required automatically:
+
+    group :development do
+      gem 'brakeman', :require => false
+    end
+
 From source:
 
     gem build brakeman.gemspec
@@ -37,13 +46,15 @@ From source:
 
 It is simplest to run Brakeman from the root directory of the Rails application. A path may also be supplied.
 
-# Options
+# Basic Options
+
+For a full list of options, use `brakeman --help` or see the OPTIONS.md file.
 
 To specify an output file for the results:
 
     brakeman -o output_file
 
-The output format is determined by the file extension or by using the `-f` option. Current options are: `text`, `html`, `tabs`, `json` and `csv`.
+The output format is determined by the file extension or by using the `-f` option. Current options are: `text`, `html`, `tabs`, `json`, `markdown`, and `csv`.
 
 Multiple output files can be specified:
 
@@ -52,6 +63,8 @@ Multiple output files can be specified:
 To suppress informational warnings and just output the report:
 
     brakeman -q
+
+Note all Brakeman output except reports are sent to stderr, making it simple to redirect stdout to a file and just get the report.
 
 To see all kinds of debugging information:
 
@@ -69,28 +82,6 @@ To do the opposite and only run a certain set of tests:
 
     brakeman -t SQL,ValidationRegex
 
-To indicate certain methods are "safe":
-
-    brakeman -s benign_method,totally_safe
-
-By default, brakeman will assume that unknown methods involving untrusted data are dangerous. For example, this would cause a warning (Rails 2):
-
-    <%= some_method(:option => params[:input]) %>
-
-To only raise warnings only when untrusted data is being directly used:
-
-    brakeman -r
-
-By default, each check will be run in a separate thread. To disable this behavior:
-
-    brakeman -n
-
-Normally Brakeman will parse `routes.rb` and attempt to infer which controller methods are used as actions. However, this is not perfect (especially for Rails 3). To ignore the automatically inferred routes and assume all methods are actions:
-
-    brakeman -a
-
-Note that this will be enabled automatically if Brakeman runs into an error while parsing the routes.
-
 If Brakeman is running a bit slow, try
 
     brakeman --faster
@@ -105,15 +96,16 @@ To skip certain files that Brakeman may have trouble parsing, use:
 
     brakeman --skip-files file1,file2,etc
 
-Brakeman will raise warnings on models that use `attr_protected`. To suppress these warnings:
-
-    brakeman --ignore-protected
-
 To compare results of a scan with a previous scan, use the JSON output option and then:
 
     brakeman --compare old_report.json
 
 This will output JSON with two lists: one of fixed warnings and one of new warnings.
+
+Brakeman will ignore warnings if configured to do so. By default, it looks for a configuration file in `config/brakeman.ignore`.
+To create and manage this file, use:
+
+    brakeman -I
 
 # Warning information
 
@@ -145,32 +137,20 @@ Brakeman options can stored and read from YAML files. To simplify the process of
 
 Options passed in on the commandline have priority over configuration files.
 
-The default config locations are `./config.yaml`, `~/.brakeman/`, and `/etc/brakeman/config.yaml`
+The default config locations are `./config/brakeman.yml`, `~/.brakeman/config.yml`, and `/etc/brakeman/config.yml`
 
 The `-c` option can be used to specify a configuration file to use.
 
+# Who is Using Brakeman?
+
+* [Code Climate](https://codeclimate.com/)
+* [GitHub](https://github.com/)
+* [Groupon](http://www.groupon.com/)
+* [New Relic](http://newrelic.com)
+* [Twitter](https://twitter.com/)
+
+[..and more!](http://brakemanscanner.org/brakeman_users)
+
 # License
 
-The MIT License
-
-Copyright (c) 2010-2012, YELLOWPAGES.COM, LLC
-
-Copyright (c) 2012, Twitter, Inc.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
+see MIT-LICENSE

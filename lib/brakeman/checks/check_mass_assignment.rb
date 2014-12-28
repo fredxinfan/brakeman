@@ -10,7 +10,12 @@ class Brakeman::CheckMassAssignment < Brakeman::BaseCheck
   @description = "Finds instances of mass assignment"
 
   def run_check
-    return if mass_assign_disabled?
+    check_mass_assignment
+    check_permit!
+  end
+
+  def find_mass_assign_calls
+    return @mass_assign_calls if @mass_assign_calls
 
     models = []
     tracker.models.each do |name, m|
@@ -19,20 +24,29 @@ class Brakeman::CheckMassAssignment < Brakeman::BaseCheck
       end
     end
 
-    return if models.empty?
-
+    return [] if models.empty?
 
     Brakeman.debug "Finding possible mass assignment calls on #{models.length} models"
-    calls = tracker.find_call :chained => true, :targets => models, :methods => [:new,
-      :attributes=, 
-      :update_attributes, 
+    @mass_assign_calls = tracker.find_call :chained => true, :targets => models, :methods => [:new,
+      :attributes=,
+      :update_attributes,
       :update_attributes!,
       :create,
       :create!,
-      :build]
+      :build,
+      :first_or_create,
+      :first_or_create!,
+      :first_or_initialize!,
+      :assign_attributes,
+      :update
+    ]
+  end
+
+  def check_mass_assignment
+    return if mass_assign_disabled?
 
     Brakeman.debug "Processing possible mass assignment calls"
-    calls.each do |result|
+    find_mass_assign_calls.each do |result|
       process_result result
     end
   end
@@ -53,8 +67,16 @@ class Brakeman::CheckMassAssignment < Brakeman::BaseCheck
       if attr_protected and tracker.options[:ignore_attr_protected]
         return
       elsif input = include_user_input?(call.arglist)
-        if not hash? call.first_arg and not attr_protected
-          confidence = CONFIDENCE[:high]
+        first_arg = call.first_arg
+
+        if call? first_arg and (first_arg.method == :slice or first_arg.method == :only)
+          return
+        elsif not node_type? first_arg, :hash
+          if attr_protected
+            confidence = CONFIDENCE[:med]
+          else
+            confidence = CONFIDENCE[:high]
+          end
           user_input = input.match
         else
           confidence = CONFIDENCE[:low]
@@ -64,11 +86,12 @@ class Brakeman::CheckMassAssignment < Brakeman::BaseCheck
         confidence = CONFIDENCE[:low]
         user_input = nil
       end
-      
-      warn :result => res, 
-        :warning_type => "Mass Assignment", 
+
+      warn :result => res,
+        :warning_type => "Mass Assignment",
+        :warning_code => :mass_assign_call,
         :message => "Unprotected mass assignment",
-        :code => call, 
+        :code => call,
         :user_input => user_input,
         :confidence => confidence
     end
@@ -78,13 +101,19 @@ class Brakeman::CheckMassAssignment < Brakeman::BaseCheck
 
   #Want to ignore calls to Model.new that have no arguments
   def check_call call
-    args = process_all call.args
+    process_call_args call
 
-    if args.empty? #empty new()
+    if call.method == :update
+      arg = call.second_arg
+    else
+      arg = call.first_arg
+    end
+
+    if arg.nil? #empty new()
       false
-    elsif hash? args.first and not include_user_input? args.first
+    elsif hash? arg and not include_user_input? arg
       false
-    elsif all_literals? args
+    elsif all_literal_args? call
       false
     else
       true
@@ -93,17 +122,69 @@ class Brakeman::CheckMassAssignment < Brakeman::BaseCheck
 
   LITERALS = Set[:lit, :true, :false, :nil, :string]
 
-  def all_literals? args
-    args.all? do |arg|
-      if sexp? arg
-        if arg.node_type == :hash
-          all_literals? arg
-        else
-          LITERALS.include? arg.node_type
-        end
-      else
-        true
+  def all_literal_args? exp
+    if call? exp
+      exp.each_arg do |arg|
+        return false unless literal? arg
+      end
+
+      true
+    else
+      exp.all? do |arg|
+        literal? arg
       end
     end
+
+  end
+
+  def literal? exp
+    if sexp? exp
+      if exp.node_type == :hash
+        all_literal_args? exp
+      else
+        LITERALS.include? exp.node_type
+      end
+    else
+      true
+    end
+  end
+
+  # Look for and warn about uses of Parameters#permit! for mass assignment
+  def check_permit!
+    tracker.find_call(:method => :permit!).each do |result|
+      if params? result[:target]
+        warn_on_permit! result
+      end
+    end
+  end
+
+  # Look for actual use of params in mass assignment to avoid
+  # warning about uses of Parameters#permit! without any mass assignment
+  # or when mass assignment is restricted by model instead.
+  def subsequent_mass_assignment? result
+    location = result[:location]
+    line = result[:call].line
+    find_mass_assign_calls.any? do |call|
+      call[:location] == location and
+      params? call[:call].first_arg and
+      call[:call].line >= line
+    end
+  end
+
+  def warn_on_permit! result
+    return if duplicate? result or result[:call].original_line
+    add_result result
+
+    confidence = if subsequent_mass_assignment? result
+                   CONFIDENCE[:high]
+                 else
+                   CONFIDENCE[:med]
+                 end
+
+    warn :result => result,
+      :warning_type => "Mass Assignment",
+      :warning_code => :mass_assign_permit!,
+      :message => "Parameters should be whitelisted for mass assignment",
+      :confidence => confidence
   end
 end

@@ -9,7 +9,9 @@ class Brakeman::CheckFileAccess < Brakeman::BaseCheck
 
   def run_check
     Brakeman.debug "Finding possible file access"
-    methods = tracker.find_call :targets => [:Dir, :File, :IO, :Kernel, :"Net::FTP", :"Net::HTTP", :PStore, :Pathname, :Shell, :YAML], :methods => [:[], :chdir, :chroot, :delete, :entries, :foreach, :glob, :install, :lchmod, :lchown, :link, :load, :load_file, :makedirs, :move, :new, :open, :read, :readlines, :rename, :rmdir, :safe_unlink, :symlink, :syscopy, :sysopen, :truncate, :unlink]
+    methods = tracker.find_call :targets => [:Dir, :File, :IO, :Kernel, :"Net::FTP", :"Net::HTTP", :PStore, :Pathname, :Shell], :methods => [:[], :chdir, :chroot, :delete, :entries, :foreach, :glob, :install, :lchmod, :lchown, :link, :load, :load_file, :makedirs, :move, :new, :open, :read, :readlines, :rename, :rmdir, :safe_unlink, :symlink, :syscopy, :sysopen, :truncate, :unlink]
+
+    methods.concat tracker.find_call :target => :YAML, :methods => [:load_file, :parse_file]
 
     Brakeman.debug "Finding calls to load()"
     methods.concat tracker.find_call :target => false, :method => :load
@@ -46,23 +48,11 @@ class Brakeman::CheckFileAccess < Brakeman::BaseCheck
     end
 
     if match
-      case match.type
-      when :params
-        message = "Parameter"
-      when :cookies
-        message = "Cookie"
-      when :request
-        message = "Request"
-      when :model
-        message = "Model attribute"
-      else
-        message = "User input"
-      end
-
-      message << " value used in file name"
+      message = "#{friendly_type_of(match).capitalize} used in file name"
 
       warn :result => result,
         :warning_type => "File Access",
+        :warning_code => :file_access,
         :message => message,
         :confidence => confidence,
         :code => call,

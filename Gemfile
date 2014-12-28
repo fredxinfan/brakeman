@@ -1,3 +1,5 @@
-source "http://rubygems.org"
+source "https://rubygems.org"
 
-gemspec
+gemspec :name => "brakeman"
+
+gem "rake", "< 10.2.0"

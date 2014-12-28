@@ -1,24 +1,24 @@
 require 'set'
-require 'active_support/inflector'
+require 'pathname'
 
 #This is a mixin containing utility methods.
 module Brakeman::Util
 
-  QUERY_PARAMETERS = Sexp.new(:call, Sexp.new(:call, nil, :request, Sexp.new(:arglist)), :query_parameters, Sexp.new(:arglist))
+  QUERY_PARAMETERS = Sexp.new(:call, Sexp.new(:call, nil, :request), :query_parameters)
 
-  PATH_PARAMETERS = Sexp.new(:call, Sexp.new(:call, nil, :request, Sexp.new(:arglist)), :path_parameters, Sexp.new(:arglist))
+  PATH_PARAMETERS = Sexp.new(:call, Sexp.new(:call, nil, :request), :path_parameters)
 
-  REQUEST_PARAMETERS = Sexp.new(:call, Sexp.new(:call, nil, :request, Sexp.new(:arglist)), :request_parameters, Sexp.new(:arglist))
+  REQUEST_PARAMETERS = Sexp.new(:call, Sexp.new(:call, nil, :request), :request_parameters)
 
-  REQUEST_PARAMS = Sexp.new(:call, Sexp.new(:call, nil, :request, Sexp.new(:arglist)), :parameters, Sexp.new(:arglist))
+  REQUEST_PARAMS = Sexp.new(:call, Sexp.new(:call, nil, :request), :parameters)
 
-  REQUEST_ENV = Sexp.new(:call, Sexp.new(:call, nil, :request, Sexp.new(:arglist)), :env, Sexp.new(:arglist))
+  REQUEST_ENV = Sexp.new(:call, Sexp.new(:call, nil, :request), :env)
 
-  PARAMETERS = Sexp.new(:call, nil, :params, Sexp.new(:arglist))
+  PARAMETERS = Sexp.new(:call, nil, :params)
 
-  COOKIES = Sexp.new(:call, nil, :cookies, Sexp.new(:arglist))
+  COOKIES = Sexp.new(:call, nil, :cookies)
 
-  SESSION = Sexp.new(:call, nil, :session, Sexp.new(:arglist))
+  SESSION = Sexp.new(:call, nil, :session)
 
   ALL_PARAMETERS = Set[PARAMETERS, QUERY_PARAMETERS, PATH_PARAMETERS, REQUEST_PARAMETERS, REQUEST_PARAMS]
 
@@ -40,10 +40,11 @@ module Brakeman::Util
       downcase
   end
 
-  #Use ActiveSupport::Inflector to pluralize a word.
+  # stupid simple, used to delegate to ActiveSupport
   def pluralize word
-    ActiveSupport::Inflector.pluralize word
+    word + "s"
   end
+
 
   #Takes an Sexp like
   # (:hash, (:lit, :key), (:str, "value"))
@@ -75,7 +76,7 @@ module Brakeman::Util
       end
       index += 2
     end
-      
+
     hash << key << value
 
     hash
@@ -96,19 +97,24 @@ module Brakeman::Util
     nil
   end
 
+  #These are never modified
+  PARAMS_SEXP = Sexp.new(:params)
+  SESSION_SEXP = Sexp.new(:session)
+  COOKIES_SEXP = Sexp.new(:cookies)
+
   #Adds params, session, and cookies to environment
   #so they can be replaced by their respective Sexps.
   def set_env_defaults
-    @env[PARAMETERS] = Sexp.new(:params)
-    @env[SESSION] = Sexp.new(:session)
-    @env[COOKIES] = Sexp.new(:cookies)
+    @env[PARAMETERS] = PARAMS_SEXP
+    @env[SESSION] = SESSION_SEXP
+    @env[COOKIES] = COOKIES_SEXP
   end
 
   #Check if _exp_ represents a hash: s(:hash, {...})
   #This also includes pseudo hashes params, session, and cookies.
   def hash? exp
-    exp.is_a? Sexp and (exp.node_type == :hash or 
-                        exp.node_type == :params or 
+    exp.is_a? Sexp and (exp.node_type == :hash or
+                        exp.node_type == :params or
                         exp.node_type == :session or
                         exp.node_type == :cookies)
   end
@@ -164,6 +170,12 @@ module Brakeman::Util
   def false? exp
     exp.is_a? Sexp and (exp.node_type == :false or
                         exp.node_type == :nil)
+  end
+
+  #Check if _exp_ represents a block of code
+  def block? exp
+    exp.is_a? Sexp and (exp.node_type == :block or
+                        exp.node_type == :rlist)
   end
 
   #Check if _exp_ is a params hash
@@ -239,6 +251,22 @@ module Brakeman::Util
     false
   end
 
+  def make_call target, method, *args
+    call = Sexp.new(:call, target, method)
+
+    if args.empty? or args.first.empty?
+      #nothing to do
+    elsif node_type? args.first, :arglist
+      call.concat args.first[1..-1]
+    elsif args.first.node_type.is_a? Sexp #just a list of args
+      call.concat args.first
+    else
+      call.concat args
+    end
+
+    call
+  end
+
   #Return file name related to given warning. Uses +warning.file+ if it exists
   def file_for warning, tracker = nil
     if tracker.nil?
@@ -246,7 +274,9 @@ module Brakeman::Util
     end
 
     if warning.file
-      File.expand_path warning.file, tracker.options[:app_path]
+      File.expand_path warning.file, tracker.app_path
+    elsif warning.template.is_a? Hash and warning.template[:file]
+      warning.template[:file]
     else
       case warning.warning_set
       when :controller
@@ -277,27 +307,27 @@ module Brakeman::Util
     unless type
       if string_name =~ /Controller$/
         type = :controller
-      elsif camelize(string_name) == string_name
+      elsif camelize(string_name) == string_name # This is not always true
         type = :model
       else
         type = :template
       end
     end
 
-    path = tracker.options[:app_path]
+    path = tracker.app_path
 
     case type
     when :controller
-      if tracker.controllers[name] and tracker.controllers[name][:file]
-        path = tracker.controllers[name][:file]
+      if tracker.controllers[name] and tracker.controllers[name][:files]
+        path = tracker.controllers[name][:files].first
       else
         path += "/app/controllers/#{underscore(string_name)}.rb"
       end
     when :model
-      if tracker.models[name] and tracker.models[name][:file]
-        path = tracker.models[name][:file]
+      if tracker.models[name] and tracker.models[name][:files]
+        path = tracker.models[name][:files].first
       else
-        path += "/app/controllers/#{underscore(string_name)}.rb"
+        path += "/app/models/#{underscore(string_name)}.rb"
       end
     when :template
       if tracker.templates[name] and tracker.templates[name][:file]
@@ -315,10 +345,10 @@ module Brakeman::Util
 
   #Return array of lines surrounding the warning location from the original
   #file.
-  def context_for warning, tracker = nil
+  def context_for app_tree, warning, tracker = nil
     file = file_for warning, tracker
     context = []
-    return context unless warning.line and file and File.exist? file
+    return context unless warning.line and file and @app_tree.path_exists? file
 
     current_line = 0
     start_line = warning.line - 5
@@ -345,9 +375,38 @@ module Brakeman::Util
     context
   end
 
+  def relative_path file
+    if file and not file.empty? and file.start_with? '/'
+      Pathname.new(file).relative_path_from(Pathname.new(@tracker.app_path)).to_s
+    else
+      file
+    end
+  end
+
+  #Convert path/filename to view name
+  #
+  # views/test/something.html.erb -> test/something
+  def template_path_to_name path
+    names = path.split("/")
+    names.last.gsub!(/(\.(html|js)\..*|\.rhtml)$/, '')
+    names[(names.index("views") + 1)..-1].join("/").to_sym
+  end
+
+  def github_url file, line=nil
+    if repo_url = @tracker.options[:github_url] and file and not file.empty? and file.start_with? '/'
+      url = "#{repo_url}/#{relative_path(file)}"
+      url << "#L#{line}" if line
+    else
+      nil
+    end
+  end
+
   def truncate_table str
-    @terminal_width ||= if $stdin && $stdin.tty?
-                          ::HighLine::SystemExtensions::terminal_size[0]
+    @terminal_width ||= if @tracker.options[:table_width]
+                          @tracker.options[:table_width]
+                        elsif $stdin && $stdin.tty?
+                          Brakeman.load_brakeman_dependency 'highline'
+                          ::HighLine.new.terminal_size[0]
                         else
                           80
                         end
@@ -364,10 +423,11 @@ module Brakeman::Util
 
   # rely on Terminal::Table to build the structure, extract the data out in CSV format
   def table_to_csv table
+    Brakeman.load_brakeman_dependency 'terminal-table'
     output = CSV.generate_line(table.headings.cells.map{|cell| cell.to_s.strip})
     table.rows.each do |row|
       output << CSV.generate_line(row.cells.map{|cell| cell.to_s.strip})
     end
     output
-  end  
+  end
 end

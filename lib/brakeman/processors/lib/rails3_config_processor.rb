@@ -1,5 +1,3 @@
-Brakeman::RAILS_CONFIG = Sexp.new(:call, nil, :config, Sexp.new(:arglist))
-  
 #Processes configuration. Results are put in tracker.config.
 #
 #Configuration of Rails via Rails::Initializer are stored in tracker.config[:rails].
@@ -14,7 +12,9 @@ Brakeman::RAILS_CONFIG = Sexp.new(:call, nil, :config, Sexp.new(:arglist))
 #  tracker.config[:rails][:active_record][:whitelist_attributes]
 #
 #Values for tracker.config[:rails] will still be Sexps.
-class Brakeman::Rails3ConfigProcessor < Brakeman::BaseProcessor
+class Brakeman::Rails3ConfigProcessor < Brakeman::BasicProcessor
+  RAILS_CONFIG = Sexp.new(:call, nil, :config)
+
   def initialize *args
     super
     @tracker.config[:rails] ||= {}
@@ -29,9 +29,14 @@ class Brakeman::Rails3ConfigProcessor < Brakeman::BaseProcessor
 
   #Look for MyApp::Application.configure do ... end
   def process_iter exp
-    if node_type?(exp.block_call.target, :colon2) and exp.block_call.method == :Application
+    call = exp.block_call
+
+    if node_type?(call.target, :colon2) and
+      call.target.rhs == :Application and
+      call.method == :configure
+
       @inside_config = true
-      process exp.body if sexp? exp.body
+      process exp.block if sexp? exp.block
       @inside_config = false
     end
 
@@ -42,7 +47,7 @@ class Brakeman::Rails3ConfigProcessor < Brakeman::BaseProcessor
   def process_class exp
     if exp.class_name == :Application
       @inside_config = true
-      process exp.body if sexp? exp.body
+      process_all exp.body if sexp? exp.body
       @inside_config = false
     end
 
@@ -53,7 +58,7 @@ class Brakeman::Rails3ConfigProcessor < Brakeman::BaseProcessor
   def process_attrasgn exp
     return exp unless @inside_config
 
-    if exp.target == Brakeman::RAILS_CONFIG
+    if exp.target == RAILS_CONFIG
       #Get rid of '=' at end
       attribute = exp.method.to_s[0..-2].to_sym
       if exp.args.length > 1
@@ -67,6 +72,14 @@ class Brakeman::Rails3ConfigProcessor < Brakeman::BaseProcessor
       level = @tracker.config[:rails]
       options[0..-2].each do |o|
         level[o] ||= {}
+
+        option = level[o]
+
+        if not option.is_a? Hash
+          Brakeman.debug "[Notice] Skipping config setting: #{options.map(&:to_s).join(".")}"
+          return exp
+        end
+
         level = level[o]
       end
 
@@ -80,12 +93,12 @@ class Brakeman::Rails3ConfigProcessor < Brakeman::BaseProcessor
   def include_rails_config? exp
     target = exp.target
     if call? target
-      if target.target == Brakeman::RAILS_CONFIG
+      if target.target == RAILS_CONFIG
         true
       else
         include_rails_config? target
       end
-    elsif target == Brakeman::RAILS_CONFIG
+    elsif target == RAILS_CONFIG
       true
     else
       false
@@ -104,7 +117,7 @@ class Brakeman::Rails3ConfigProcessor < Brakeman::BaseProcessor
       attribute = exp.method.to_s[0..-2].to_sym
       get_rails_config(exp.target) << attribute
     elsif call? exp
-      if exp.target == Brakeman::RAILS_CONFIG
+      if exp.target == RAILS_CONFIG
         [exp.method]
       else
         get_rails_config(exp.target) << exp.method

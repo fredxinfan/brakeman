@@ -11,18 +11,21 @@
 $LOAD_PATH.unshift "#{File.expand_path(File.dirname(__FILE__))}/../lib"
 
 require 'brakeman'
+require 'ruby_parser'
+require 'ruby_parser/bm_sexp'
 require 'brakeman/options'
+require 'brakeman/report/report_base'
 
-class Brakeman::Report
-  def to_tests
+class Brakeman::Report::Tests < Brakeman::Report::Base
+  def generate_report
     counter = 0
 
-    name = camelize File.basename(tracker.options[:app_path])
+    name = camelize File.basename(tracker.app_path)
 
     output = <<-RUBY
 abort "Please run using test/test.rb" unless defined? BrakemanTester
 
-#{name} = BrakemanTester.run_scan "#{File.basename tracker.options[:app_path]}", "#{name}"
+#{name} = BrakemanTester.run_scan "#{File.basename tracker.app_path}", "#{name}"
 
 class #{name}Tests < Test::Unit::TestCase
   include BrakemanTester::FindWarning
@@ -48,14 +51,17 @@ class #{name}Tests < Test::Unit::TestCase
       <<-RUBY
   def test_#{w.warning_type.to_s.downcase.tr(" -", "__")}_#{counter}
     assert_warning :type => #{w.warning_set.inspect},
+      :warning_code => #{w.warning_code},
+      :fingerprint => #{w.fingerprint.inspect},
       :warning_type => #{w.warning_type.inspect},
-      #{w.line ? ":line => " : "#noline"}#{w.line},
+      :line => #{w.line.inspect},
       :message => /^#{Regexp.escape w.message[0,40]}/,
       :confidence => #{w.confidence},
-      :file => /#{Regexp.escape(File.basename w.file)}/
+      :relative_path => #{w.relative_path.inspect},
+      :user_input => #{w.user_input.inspect}
   end
       RUBY
-    end.join("\n\n")
+    end.join("\n")
 
     output << "\nend"
   end
@@ -65,12 +71,12 @@ options, _ = Brakeman::Options.parse!(ARGV)
 
 unless options[:app_path]
   if ARGV[-1].nil?
-    options[:app_path] = File.expand_path "."
+    options[:app_path] = "."
   else
-    options[:app_path] = File.expand_path ARGV[-1]
+    options[:app_path] = ARGV[-1]
   end
 end
 
 tracker = Brakeman.run options
 
-puts tracker.report.to_tests
+puts Brakeman::Report::Tests.new(nil, tracker).generate_report

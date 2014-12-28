@@ -29,6 +29,8 @@ module Brakeman::RouteHelper
       route = route.value
     end
 
+    return unless route.is_a? String or route.is_a? Symbol
+
     route = route.to_sym
 
     if controller
@@ -37,7 +39,7 @@ module Brakeman::RouteHelper
 
     routes = @tracker.routes[@current_controller]
     
-    if routes and routes != :allow_all_actions
+    if routes and not routes.include? :allow_all_actions
       routes << route
     end
   end
